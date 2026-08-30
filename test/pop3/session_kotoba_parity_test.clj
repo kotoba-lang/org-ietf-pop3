@@ -45,7 +45,7 @@
 ;;
 ;;   amu check   kotoba/pop3/session.kotoba --jvm-free            -> :ok true
 ;;   amu compile kotoba/pop3/session.kotoba --jvm-free \
-;;     --target wasm32-browser                       -> 11385-byte .wasm
+;;     --target wasm32-browser                       -> 12554-byte .wasm
 ;;
 ;; (Measured 2026-08-30 on amu 88ae83e. An observation of one build, not a
 ;; contract — re-measure rather than quoting it.)
@@ -111,11 +111,13 @@
 
 (defn- ->guest-config
   "The oracle's config, minus the secrets. This asymmetry is the point."
-  [{:keys [user password access-token uidl?]}]
+  [{:keys [user password access-token uidl? want number]}]
   (cond-> {:user user
            :has-password? (some? password)
            :has-access-token? (some? access-token)}
-    (some? uidl?) (assoc :uidl? uidl?)))
+    (some? uidl?) (assoc :uidl? uidl?)
+    (some? want) (assoc :want want)
+    (some? number) (assoc :number number)))
 
 (defn- guest-run
   "Drive the guest with `script`, one reply line per `step`.
@@ -129,7 +131,8 @@
   [config script]
   (loop [state (call 'init [(->doc (->guest-config config))])
          lines script
-         written []]
+         written []
+         body []]
     (let [kind (call 'outgoing-kind [state])
           out (call 'outgoing [state])
           written (cond
@@ -137,11 +140,21 @@
                     (seq out) (conj written out)
                     :else written)
           phase (call 'phase [state])
+          ;; What a host does with the body channel: open a buffer, append
+          ;; every non-empty line, seal it. The guest holds none of this.
+          body (if (call 'body-line? [state])
+                 (conj body (call 'body-line [state]))
+                 body)
           done? (contains? #{:done :failed} phase)]
       (if (or done? (empty? lines))
         (let [final (if done? state (call 'closed [state]))]
           {:state final
            :phase (call 'phase [final])
+           ;; joined the way `pop3.client/retrieve!` joins it
+           :message (str/join "\r\n" body)
+           :body-lines (count body)
+           :body-state (call 'body-state [final])
+           :retrieved (call 'retrieved-bytes [final])
            :written (normalise written)
            :error (call 'error-text [final])
            :apop-timestamp (call 'apop-timestamp [final])
@@ -152,7 +165,7 @@
                               :size (call 'message-size-at [final i])
                               :uid (call 'message-uid-at [final i])})
                            (range (call 'message-count [final])))})
-        (recur (call 'step [state (first lines)]) (rest lines) written)))))
+        (recur (call 'step [state (first lines)]) (rest lines) written body)))))
 
 ;; --- driving the oracle ----------------------------------------------------
 
@@ -358,3 +371,105 @@
     (is (= :failed (:phase guest)))
     (is (= "POP3 の認証情報がありません。" (:error guest)))
     (is (nil? (some credential-kinds (:written guest))))))
+
+;; --- RETR: the message passes through and is never a guest value ----------
+
+(def ^:private retrieve-config
+  (assoc with-password :want :retrieve :number 1))
+
+(deftest a-retrieved-message-matches-the-oracle-byte-for-byte
+  (let [body ["From: a@example.com" "Subject: hi" "" "body line one" "body line two"]
+        script (into no-capa-prefix
+                     (concat ["+OK 1 120" "+OK 120 octets"] body ["." "+OK bye"]))
+        guest (guest-run retrieve-config script)
+        {:keys [transport written]} (fake/make script)]
+    (testing "the guest completed and handed over every line"
+      (is (= :done (:phase guest)) (:error guest))
+      (is (= :closed (:body-state guest)))
+      (is (= (count body) (:retrieved guest))))
+    (testing "and what the host assembled is what the oracle returns"
+      (let [session (-> (client/connect! "pop.example.com" {:transport transport})
+                        (client/capabilities!))
+            session (client/authenticate! session
+                                          (select-keys retrieve-config
+                                                       [:user :password]))
+            _ (client/stat! session)
+            oracle-message (client/retrieve! session 1)]
+        (client/quit! session)
+        (is (= oracle-message (:message guest)))
+        (is (= (normalise @written) (:written guest)))))))
+
+(deftest a-stuffed-body-line-loses-exactly-one-dot-in-a-message
+  (testing "RFC 1939 §3. The CAPA test above covers a capability name; this
+            is the case that actually corrupts mail -- a message line that
+            begins with a period, which is rarer than it sounds and
+            therefore worse."
+    (let [script (into no-capa-prefix
+                       (concat ["+OK 1 40" "+OK 40 octets"]
+                               ["..hidden leading dot" "...two of them" "plain"]
+                               ["." "+OK bye"]))
+          guest (guest-run retrieve-config script)]
+      (is (= :done (:phase guest)) (:error guest))
+      (is (= ".hidden leading dot\r\n..two of them\r\nplain" (:message guest))))))
+
+(deftest a-lone-dot-ends-the-message-and-is-not-part-of-it
+  (let [script (into no-capa-prefix
+                     (concat ["+OK 1 10" "+OK 10 octets"] ["only line"] ["." "+OK bye"]))
+        guest (guest-run retrieve-config script)]
+    (is (= "only line" (:message guest)))
+    (is (= 1 (:retrieved guest)))))
+
+(deftest session-carries-no-message-bytes
+  (testing "the design claim, tested rather than asserted in a comment: a
+            `:document` vector holds 32 items, so a guest that accumulated
+            the message traps `document-vector-too-large` on the 33rd line.
+            Verified by making it accumulate and watching exactly this test
+            fail with exactly that trap -- and nothing else fail. It
+            finishes because nothing in the guest keeps a line."
+    (let [line (apply str (repeat 200 "x"))
+          body (vec (repeat 2000 line))
+          bytes (* (count body) (count line))
+          script (into no-capa-prefix
+                       (concat ["+OK 1 400000" "+OK 400000 octets"] body ["." "+OK bye"]))
+          guest (guest-run retrieve-config script)]
+      (is (< 32 (count body)) "the control is only meaningful past :container-items")
+      (is (< 65536 bytes) "and past the aggregate byte bound too")
+      (is (= :done (:phase guest)) (:error guest))
+      (is (= 2000 (:retrieved guest)))
+      (is (= (* 2000 200) (count (str/replace (:message guest) "\r\n" ""))))
+      (testing "and the guest's own answer about it is one integer"
+        (is (= 2000 (call 'retrieved-bytes [(:state guest)])))))))
+
+(deftest a-refused-retr-does-not-wait-for-a-terminator
+  (testing "RFC 1939 §3 sends the body only on success; reading for a
+            terminator after -ERR waits for a line that is never coming"
+    (let [script (into no-capa-prefix
+                       ["+OK 1 120" "-ERR no such message"])
+          guest (guest-run retrieve-config script)]
+      (is (= :failed (:phase guest)))
+      (is (= "POP3 RETR failed: no such message" (:error guest)))
+      (is (= :none (:body-state guest))))))
+
+(deftest retrieve-puts-the-number-on-the-wire
+  (testing "there is no integer-to-string builtin; the digits come out of a
+            literal, so a multi-digit number is the case that catches it"
+    (let [script (into no-capa-prefix
+                       (concat ["+OK 42 120" "+OK 120 octets"] ["x"] ["." "+OK bye"]))
+          guest (guest-run (assoc retrieve-config :number 137) script)]
+      (is (= :done (:phase guest)) (:error guest))
+      (is (some #{"RETR 137\r\n"} (:written guest))))))
+
+(deftest an-empty-body-line-is-a-line
+  (testing "RFC 2822 separates headers from body with an empty line. The
+            first version of this channel signalled \"no line this step\" by
+            returning \"\", which merged the headers into the body of every
+            message; the parity test caught it on its first run. `body-line?`
+            is why that cannot recur -- the emptiness of the string does not
+            carry the answer."
+    (let [body ["Subject: hi" "" "" "two blank lines above"]
+          script (into no-capa-prefix
+                       (concat ["+OK 1 40" "+OK 40 octets"] body ["." "+OK bye"]))
+          guest (guest-run retrieve-config script)]
+      (is (= :done (:phase guest)) (:error guest))
+      (is (= 4 (:retrieved guest)) "all four lines, blanks included")
+      (is (= "Subject: hi\r\n\r\n\r\ntwo blank lines above" (:message guest))))))
