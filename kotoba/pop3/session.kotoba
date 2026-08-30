@@ -9,7 +9,8 @@
 ;;   outgoing (state)        -> string   ; the inert effect out
 ;;
 ;; State is a `:document`, and so is the `config` handed to `init`: `:user`,
-;; `:has-password?`, `:has-access-token?`, `:uidl?`.
+;; `:has-password?`, `:has-access-token?`, `:uidl?`, and `:want`
+;; (`:list`, the default, or `:retrieve` with `:number`).
 ;;
 ;; **No credential reaches the guest.** `init` is told *whether* a password
 ;; and a token exist, never what they are. The effect channel is a pair:
@@ -77,16 +78,31 @@
 ;; when `compile --module-lock` accepts a non-JS target this file may split
 ;; if it ever outgrows one module.
 ;;
-;; **RETR is not in this slice, and not because it is hard.** A retrieved
-;; message is bytes, and `:document` bounds them at 256 nodes / 65536 UTF-8
-;; bytes. Routing a mailbox through the guest would hit that ceiling on an
-;; ordinary message with an attachment. The same principle ADR-2608039970
-;; states for the datom plane applies here: bytes do not go through the
-;; value plane. When RETR lands, the guest owns *when the body starts, when
-;; the terminator ends it, and whether a line was stuffed*, and hands the
-;; host one unstuffed line at a time without buffering. CAPA / LIST / UIDL
-;; are accumulated here because they are bounded and structured — they are
-;; semantics, not payload.
+;; **RETR passes bytes through; it does not hold them.** A retrieved message
+;; is bytes, and a `:document` cannot hold them. The bound that binds first
+;; is `:container-items 32`, so a guest collecting body lines traps
+;; `document-vector-too-large` on the 33rd line of an ordinary mail --
+;; measured, by making it accumulate and watching the control below fail
+;; with exactly that trap. (`:nodes 256` and `:aggregate-utf8-bytes 65536`
+;; are the other ceilings; 32 is the one a message meets first.) The principle
+;; ADR-2608039970 states for the datom plane applies here: bytes do not go
+;; through the value plane. So the guest owns *when the body starts, when
+;; the terminator ends it, and whether a line was stuffed* — and hands the
+;; host one unstuffed line at a time, keeping none of them:
+;;
+;;   body-state  :none -> :open -> :closed   ; the host opens and seals a buffer
+;;   body-line?                              ; did THIS step produce a line
+;;   body-line                               ; the line to append
+;;
+;; `retrieved-bytes` counts what went past, which is semantics (the caller
+;; asked for a message and is owed an answer about it) and costs one i64.
+;; The message itself is never a guest value. `session-carries-no-message-
+;; bytes` is the negative control: it drives a 2000-line body past every one
+;; of those bounds, which only completes because nothing here accumulates
+;; it.
+;;
+;; CAPA / LIST / UIDL are accumulated because they are bounded and
+;; structured — they are semantics, not payload.
 ;;
 ;; No regular expressions: the oracle's four `re-find` sites became
 ;; positional scans (ADR-2608650000 decision 6 — redesign the scan, do not
@@ -103,13 +119,14 @@
 ;; Measured 2026-08-30 on amu 88ae83e, both without a JDK on PATH:
 ;;   amu check   … --jvm-free                     -> :ok true, :effects #{}
 ;;   amu compile … --jvm-free --target wasm32-browser
-;;                                                -> 11385-byte .wasm
+;;                                                -> 12554-byte .wasm
 ;; Those are observations of one build, not a contract; re-measure rather
 ;; than quoting them.
 
 (ns pop3.session
   (:export [init step closed
             phase outgoing outgoing-kind error-text
+            body-state body-line? body-line retrieved-bytes
             apop-timestamp
             message-count message-number-at message-size-at message-uid-at
             drop-count drop-size
@@ -187,6 +204,28 @@
 
 (defn- parse-i64-at [s :string i :i64] :i64
   (if (digit? (at-byte s i)) (read-i64 s i -1) -1))
+
+;; --- integers to text -----------------------------------------------------
+;; `RETR <n>` puts a number on the wire and there is no integer-to-string
+;; builtin, so the digits come out of a literal — the same way
+;; `examples/todo-app.kotoba` reads its counter. `rem` is spelled as a
+;; subtraction because `max` is in `:admitted-builtins` and still has no
+;; lowering (measured 2026-08-30), and one such surprise per file is enough.
+;;
+;; This is the second copy of these four lines in the workspace
+;; (`org-ietf-imap` has the first). They cannot be shared: the only linking
+;; route is the project route, which the CLI runs on the JVM, which Q9
+;; forbids — see adr-2608302100 for the measurement and the removal
+;; conditions.
+
+(defn- digit-char [n :i64] :string
+  (string-substring "0123456789" n (+ n 1)))
+
+(defn- i64->string [n :i64] :string
+  (if (< n 10)
+    (digit-char n)
+    (string-concat (i64->string (quot n 10))
+                   (digit-char (- n (* (quot n 10) 10))))))
 
 ;; --- ASCII case folding ---------------------------------------------------
 ;; RFC 2449 §5 makes capability names case-insensitive, and comparing them
@@ -280,6 +319,18 @@
                               (option-value-of [:option :bool]
                                                (document-bool-value (dg config :uidl?))
                                                true))
+                :want (document-keyword
+                       (option-value-of [:option :keyword]
+                                        (document-keyword-value (dg config :want))
+                                        :list))
+                :number (document-i64
+                         (option-value-of [:option :i64]
+                                          (document-i64-value (dg config :number))
+                                          0))
+                :body-state (document-keyword :none)
+                :body-line (document-string "")
+                :has-body-line (document-bool false)
+                :retrieved (document-i64 0)
                 :apop-stamp (document-string "")
                 :sasl (document-string "")
                 :capa (document-vector)
@@ -292,34 +343,47 @@
                 :out-kind (document-keyword :none)
                 :error (document-string "")))
 
+;; `body-line?` exists because "" is a line a message can contain: RFC 2822
+;; separates headers from body with an empty one. A channel that signalled
+;; "no line this step" by returning "" would merge the headers into the body
+;; of every message -- which the parity test caught on the first run, and
+;; which no amount of staring at `body-line` alone would have shown.
+(defn- clear-body [state :document] :document
+  (document-assoc (document-assoc state :body-line (document-string ""))
+                  :has-body-line (document-bool false)))
+
 (defn- quiet [state :document] :document
-  (document-assoc (document-assoc state :out (document-string ""))
-                  :out-kind (document-keyword :none)))
+  (clear-body
+   (document-assoc (document-assoc state :out (document-string ""))
+                   :out-kind (document-keyword :none))))
 
 (defn- send-line [state :document next-phase :keyword line :string] :document
-  (document-assoc
+  (clear-body
    (document-assoc
-    (document-assoc state :phase (document-keyword next-phase))
-    :out (document-string line))
-   :out-kind (document-keyword :line)))
+    (document-assoc
+     (document-assoc state :phase (document-keyword next-phase))
+     :out (document-string line))
+    :out-kind (document-keyword :line))))
 
 ;; The guest names a credential it does not hold. `outgoing` stays "" — the
 ;; host owns the secret, the base64 (RFC 5034) and the MD5 (RFC 1939 §7).
 (defn- send-credential [state :document next-phase :keyword kind :keyword] :document
-  (document-assoc
-   (document-assoc
-    (document-assoc state :phase (document-keyword next-phase))
-    :out (document-string ""))
-   :out-kind (document-keyword kind)))
-
-(defn- fail [state :document message :string] :document
-  (document-assoc
+  (clear-body
    (document-assoc
     (document-assoc
-     (document-assoc state :phase (document-keyword :failed))
-     :error (document-string message))
-    :out (document-string ""))
-   :out-kind (document-keyword :none)))
+     (document-assoc state :phase (document-keyword next-phase))
+     :out (document-string ""))
+    :out-kind (document-keyword kind))))
+
+(defn- fail [state :document message :string] :document
+  (clear-body
+   (document-assoc
+    (document-assoc
+     (document-assoc
+      (document-assoc state :phase (document-keyword :failed))
+      :error (document-string message))
+     :out (document-string ""))
+    :out-kind (document-keyword :none))))
 
 ;; --- accumulating a multi-line response -----------------------------------
 
@@ -461,6 +525,17 @@
 (defn- begin-list [state :document] :document
   (send-line (reset-acc state) :list (line1 "LIST")))
 
+;; RETR is the other half of what a POP3 client is for. The number goes on
+;; the wire; the message that comes back does not come in here.
+(defn- begin-retr [state :document] :document
+  (send-line state :retr
+             (line2 "RETR" (i64->string (di state :number)))))
+
+(defn- begin-work [state :document] :document
+  (if (= (dk state :want) :retrieve)
+    (begin-retr state)
+    (begin-list state)))
+
 (defn- after-list [state :document] :document
   (let [msgs (scan-listing (dg state :acc) 0 (document-vector))
         kept (document-assoc state :messages msgs)]
@@ -544,7 +619,7 @@
 
       (= p :stat)
       (if ok
-        (begin-list
+        (begin-work
          (document-assoc
           (document-assoc state :drop-count (document-i64 (let [v (stat-count line)] (if (< v 0) 0 v))))
           :drop-size (document-i64 (let [v (stat-size line)] (if (< v 0) 0 v)))))
@@ -553,6 +628,15 @@
       (= p :list)
       (if ok (quiet (document-assoc state :phase (document-keyword :list-body)))
           (fail state (string-concat "POP3 LIST failed: " text)))
+
+      ;; RFC 1939 §3 sends the body only on success, so reading for a
+      ;; terminator after -ERR waits for a line that is never coming.
+      (= p :retr)
+      (if ok
+        (quiet (document-assoc
+                (document-assoc state :phase (document-keyword :retr-body))
+                :body-state (document-keyword :open)))
+        (fail state (string-concat "POP3 RETR failed: " text)))
 
       ;; UIDL is optional (RFC 1939 §7). Its absence leaves the caller with
       ;; numbers only, which is an absent :uid rather than a failed listing.
@@ -570,6 +654,21 @@
 (defn- on-body [state :document line :string] :document
   (let [p (dk state :phase)]
     (cond
+      ;; The message is handed over one unstuffed line at a time and kept
+      ;; nowhere. Only the count survives in the guest.
+      (and (= p :retr-body) (not (terminator? line)))
+      (document-assoc
+       (document-assoc
+        (document-assoc
+         (document-assoc (quiet state) :body-line (document-string (unstuff line)))
+         :has-body-line (document-bool true))
+        :retrieved (document-i64 (+ (di state :retrieved) 1)))
+       :body-state (document-keyword :open))
+
+      (= p :retr-body)
+      (send-line (document-assoc state :body-state (document-keyword :closed))
+                 :quit (line1 "QUIT"))
+
       (not (terminator? line)) (quiet (push-acc state line))
 
       (= p :capa-body)
@@ -583,7 +682,8 @@
       :else (quiet state))))
 
 (defn- body-phase? [p :keyword] :bool
-  (or (= p :capa-body) (or (= p :list-body) (= p :uidl-body))))
+  (or (= p :capa-body)
+      (or (= p :list-body) (or (= p :uidl-body) (= p :retr-body)))))
 
 ;; RFC 5034's AUTH exchange is not made of status lines: the server's
 ;; request for the initial response is a bare `+`. Applying the status-line
@@ -621,6 +721,24 @@
 (defn outgoing-kind [state :document] :keyword (dk state :out-kind))
 
 (defn error-text [state :document] :string (ds state :error))
+
+;; :none -> :open -> :closed. The host opens a buffer on :open, appends every
+;; non-empty `body-line`, and seals it on :closed. Nothing here holds the
+;; message.
+(defn body-state [state :document] :keyword (dk state :body-state))
+
+;; Did this step produce a body line? Ask before reading `body-line`: ""
+;; is a line a message can contain (RFC 2822's header/body separator), so
+;; the emptiness of the string cannot carry "there was none".
+(defn body-line? [state :document] :bool (db state :has-body-line))
+
+;; The unstuffed line the host should append. Valid only for the step that
+;; produced it, and only when `body-line?`.
+(defn body-line [state :document] :string (ds state :body-line))
+
+;; How many body lines went past. The caller asked for a message and is owed
+;; an answer about it; that answer costs one i64, not the message.
+(defn retrieved-bytes [state :document] :i64 (di state :retrieved))
 
 (defn apop-timestamp [state :document] :string (ds state :apop-stamp))
 
