@@ -8,6 +8,18 @@ A genuine POP3 (RFC 1939) client — no `curl` shell-out, no
 convention (see `org-ietf-imap`, `org-ietf-smtp`, `org-ietf-mime`) — POP3 is
 an IETF specification (RFC 1939), hence `org-ietf-pop3`.
 
+## The session as a Kotoba application
+
+`kotoba/pop3/session.kotoba` is the maildrop-listing session — greeting,
+CAPA, the strongest authentication the server advertised, STAT, LIST, UIDL,
+QUIT — written as a Kotoba guest (`init` / `step` / `closed` / `outgoing`).
+**No credential reaches it**: it is told whether a password exists, never
+what it is, and it names `:credential/pass` where the host writes one. The
+socket, TLS, base64 and MD5 stay here in `.cljc`, which remains the oracle
+`test/pop3/session_kotoba_parity_test.clj` compares against. See that
+module's header for the guest/host line and the two design decisions it
+records.
+
 ## Why this exists
 
 The third of the three protocols a mailbox is actually reached over, and the
