@@ -10,12 +10,20 @@
                       ;;
                       ;; Pins are the west pair (amu + kotoba-kir) as of this
                       ;; commit; they are advanced together.
+                      ;;
+                      ;; Advanced with the annotation removal in kotoba/: the
+                      ;; guest now relies on the frontend inferring a
+                      ;; parameter's type from its use and a result's from its
+                      ;; body, and on annotation being per-parameter. The
+                      ;; previous pin refuses the result outright --
+                      ;; `typed parameters require alternating name/type pairs`
+                      ;; (measured, on the minimised source).
                       io.github.kotoba-lang/amu
                       {:git/url "https://github.com/kotoba-lang/amu.git"
-                       :git/sha "35e8a18f2842762bedbf88b32f22e1128ad95cf0"}
+                       :git/sha "27d82d8593b99b5ca95d09351bf6ff04f97c2ffd"}
                       io.github.kotoba-lang/kotoba-kir
                       {:git/url "https://github.com/kotoba-lang/kotoba-kir.git"
-                       :git/sha "099c627609ad506babf05f2d5e9a73b95c1b026b"}}
+                       :git/sha "b6bfe238396631ff4b61934264a919f8ae5236b7"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
 
