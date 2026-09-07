@@ -21,8 +21,8 @@
                       io.github.kotoba-lang/amu
                       {:git/url "https://github.com/kotoba-lang/amu.git"
                        :git/sha "27d82d8593b99b5ca95d09351bf6ff04f97c2ffd"}
-                      io.github.kotoba-lang/kotoba-kir
-                      {:git/url "https://github.com/kotoba-lang/kotoba-kir.git"
+                      io.github.kotoba-lang/osaho
+                      {:git/url "https://github.com/kotoba-lang/osaho.git"
                        :git/sha "b6bfe238396631ff4b61934264a919f8ae5236b7"}}
          :main-opts ["-m" "cognitect.test-runner"]
          :exec-fn cognitect.test-runner.api/test}
