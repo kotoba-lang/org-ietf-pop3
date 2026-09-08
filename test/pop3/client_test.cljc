@@ -1,5 +1,5 @@
 (ns pop3.client-test
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [pop3.client :as client]
             [pop3.fake-transport :as fake]

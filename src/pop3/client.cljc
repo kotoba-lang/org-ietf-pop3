@@ -19,7 +19,7 @@
   deletes implicitly — a mail client that removes the server's only copy
   as a side effect of reading it has destroyed the mailbox for every
   other client the account is opened in. `delete!` exists and says so."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [pop3.protocol :as p]
             [pop3.transport :as t]))
 
@@ -96,7 +96,7 @@
 (defn supports?
   "Whether a capability was advertised (case-insensitive)."
   [session capability]
-  (contains? (:capabilities session {}) (str/upper-case (str capability))))
+  (contains? (:capabilities session {}) (str/upper (str capability))))
 
 #?(:clj
 (defn stls!
