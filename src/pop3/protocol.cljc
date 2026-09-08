@@ -12,7 +12,7 @@
   server sent, and `kotoba-lang/org-ietf-mime` turns those into headers,
   parts, attachments and decoded text. Wire protocol is this library's
   subject; message format is that one's."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 ;; ------------------------------------------------------------- responses
 
@@ -106,7 +106,7 @@
                 (let [line (str/trim (str line))]
                   (when (seq line)
                     (let [[k v] (str/split line #"\s+" 2)]
-                      [(str/upper-case k) (or v "")])))))
+                      [(str/upper k) (or v "")])))))
         lines))
 
 (defn sasl-mechanisms
@@ -114,7 +114,7 @@
   [capabilities]
   (->> (str/split (or (get capabilities "SASL") "") #"\s+")
        (remove str/blank?)
-       (map str/upper-case)
+       (map str/upper)
        set))
 
 ;; -------------------------------------------------------------- greeting
