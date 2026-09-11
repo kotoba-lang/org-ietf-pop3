@@ -105,8 +105,8 @@ the session out, and every other client is refused in the meantime.
 ## Tests
 
 ```bash
-clojure -M:test    # 26 tests, 53 assertions
-clojure -M:lint
+kbb -M:test    # 26 tests, 53 assertions
+kbb -M:lint
 ```
 
 Including RFC 1939 §7's own worked APOP example, which is the only way to
