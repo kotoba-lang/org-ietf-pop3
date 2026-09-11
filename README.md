@@ -16,7 +16,7 @@ QUIT — written as a Kotoba guest (`init` / `step` / `closed` / `outgoing`).
 **No credential reaches it**: it is told whether a password exists, never
 what it is, and it names `:credential/pass` where the host writes one. The
 socket, TLS, base64 and MD5 stay here in `.cljc`, which remains the oracle
-`test/pop3/session_kotoba_parity_test.clj` compares against. See that
+`test/pop3/session_kotoba_parity_test.cljk` compares against. See that
 module's header for the guest/host line and the two design decisions it
 records.
 
@@ -46,7 +46,7 @@ pop3.client    -- the session driver: connect!/capabilities!/stls!/authenticate!
 `pop3.protocol` has zero I/O — every command-building and response-parsing
 function is pure and tested without a socket. `pop3.client` drives the
 read-until-terminator loop over an injected `Transport`
-(`test/pop3/fake_transport.cljc`, a scripted in-memory `Transport`), so it is
+(`test/pop3/fake_transport.cljk`, a scripted in-memory `Transport`), so it is
 tested the same way — never only against a live server.
 
 ## RFC coverage
