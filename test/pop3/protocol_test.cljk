@@ -1,5 +1,5 @@
 (ns pop3.protocol-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [pop3.protocol :as p]))
 
 (deftest status-reads-the-only-two-indicators-pop3-has
