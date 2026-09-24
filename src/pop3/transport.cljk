@@ -26,7 +26,8 @@
   bug in the MIME parser.
 
   Command *writes* stay UTF-8, because a command is text this library
-  composed rather than bytes it received.")
+  composed rather than bytes it received."
+  (:require [kotoba.netcap.tls-host :as tls-host]))
 
 (defprotocol Transport
   (write! [t s] "Write string `s` (already CRLF-terminated by the caller) to the wire.")
@@ -60,9 +61,7 @@
   "Real transport: connect to `host`:`port` over TLS (default port 995,
   POP3S). `timeout-ms` bounds each individual socket read."
   [{:keys [host port timeout-ms] :or {port 995 timeout-ms 20000}}]
-  (let [factory (javax.net.ssl.SSLSocketFactory/getDefault)
-        socket (.createSocket ^javax.net.ssl.SSLSocketFactory factory ^String host (int port))]
-    (.setSoTimeout ^javax.net.ssl.SSLSocket socket (int timeout-ms))
+  (let [socket (tls-host/connect {:host host :port (int port) :timeout-ms (int timeout-ms)})]
     (->SocketTransport socket (.getInputStream socket) (.getOutputStream socket)))))
 
 #?(:clj
