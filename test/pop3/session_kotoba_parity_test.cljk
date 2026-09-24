@@ -51,7 +51,7 @@
 ;; contract — re-measure rather than quoting it.)
 
 (ns pop3.session-kotoba-parity-test
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.io :as io]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.compiler.core :as compiler]
@@ -206,7 +206,7 @@
 ;; --- the tests -------------------------------------------------------------
 
 (deftest guest-source-is-present
-  (is (.exists guest-file) (str "kotoba object not found at " guest-file)))
+  (is (io/exists? guest-file) (str "kotoba object not found at " guest-file)))
 
 (deftest a-sasl-plain-listing-session-agrees-with-the-oracle
   (let [script ["+OK POP3 ready"
